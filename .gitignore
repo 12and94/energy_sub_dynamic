@@ -34,6 +34,8 @@ frame_*.obj
 
 # Local docs drafts (exclude from default GitHub upload)
 /docs/
+/GITHUB_PUBLISH_CN.md
+/PIPELINE_CN.md
 
 # Editors
 /.vscode/
