@@ -1,0 +1,57 @@
+#version 460
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform PushConstants {
+    uint numVerts;
+    uint numTets;
+    float invDt2;
+    float mu;
+    float lam;
+    float alpha;
+    float groundY;
+    float groundK;
+    uint useGround;
+    uint numReduced;
+} pc;
+
+layout(std430, binding = 0) readonly buffer BasisBuf {
+    float basis[];
+};
+
+layout(std430, binding = 1) readonly buffer XRestBuf {
+    vec4 xRest[];
+};
+
+layout(std430, binding = 2) readonly buffer ReducedQBuf {
+    float reducedQ[];
+};
+
+layout(std430, binding = 3) writeonly buffer XOutBuf {
+    vec4 xOut[];
+};
+
+void main() {
+    uint v = gl_GlobalInvocationID.x;
+    if (v >= pc.numVerts) {
+        return;
+    }
+
+    float ux = 0.0;
+    float uy = 0.0;
+    float uz = 0.0;
+
+    uint r = pc.numReduced;
+    uint row0 = (3u * v + 0u) * r;
+    uint row1 = (3u * v + 1u) * r;
+    uint row2 = (3u * v + 2u) * r;
+    for (uint k = 0u; k < r; ++k) {
+        float qk = reducedQ[k];
+        ux += basis[row0 + k] * qk;
+        uy += basis[row1 + k] * qk;
+        uz += basis[row2 + k] * qk;
+    }
+
+    vec3 xr = xRest[v].xyz;
+    xOut[v] = vec4(xr + vec3(ux, uy, uz), 0.0);
+}

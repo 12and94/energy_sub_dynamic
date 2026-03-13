@@ -1,0 +1,73 @@
+#version 460
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform PushConstants {
+    uint numVerts;
+    uint numTets;
+    float invDt2;
+    float mu;
+    float lam;
+    float alpha;
+    float groundY;
+    float groundK;
+    uint useGround;
+    uint numReduced;
+} pc;
+
+layout(std430, binding = 0) readonly buffer XBuf {
+    vec4 x[];
+};
+
+layout(std430, binding = 1) readonly buffer XStarBuf {
+    vec4 xStar[];
+};
+
+layout(std430, binding = 2) readonly buffer MassBuf {
+    float mass[];
+};
+
+layout(std430, binding = 3) readonly buffer CsrOffsetBuf {
+    uint offsets[];
+};
+
+layout(std430, binding = 4) readonly buffer CsrTetBuf {
+    uint csrTet[];
+};
+
+layout(std430, binding = 5) readonly buffer CsrLocalBuf {
+    uint csrLocal[];
+};
+
+layout(std430, binding = 6) readonly buffer TetContribBuf {
+    vec4 tetContrib[];
+};
+
+layout(std430, binding = 7) writeonly buffer ForceBuf {
+    vec4 force[];
+};
+
+void main() {
+    uint v = gl_GlobalInvocationID.x;
+    if (v >= pc.numVerts) {
+        return;
+    }
+
+    vec3 xi = x[v].xyz;
+    vec3 xsi = xStar[v].xyz;
+    vec3 sum = mass[v] * pc.invDt2 * (xi - xsi);
+
+    if (pc.useGround != 0u && xi.y < pc.groundY) {
+        sum.y += -pc.groundK * (pc.groundY - xi.y);
+    }
+
+    uint begin = offsets[v];
+    uint end = offsets[v + 1u];
+    for (uint idx = begin; idx < end; ++idx) {
+        uint t = csrTet[idx];
+        uint local = csrLocal[idx];
+        sum += tetContrib[t * 4u + local].xyz;
+    }
+
+    force[v] = vec4(sum, 0.0);
+}

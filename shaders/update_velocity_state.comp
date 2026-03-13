@@ -1,0 +1,46 @@
+#version 460
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform PushConstants {
+    uint numVerts;
+    uint numTets;
+    float invDt2;
+    float mu;
+    float lam;
+    float alpha;
+    float groundY;
+    float groundK;
+    uint useGround;
+    uint numReduced;
+    float dt;
+    float invDt;
+    float gravityX;
+    float gravityY;
+    float gravityZ;
+} pc;
+
+layout(std430, binding = 0) readonly buffer XBuf {
+    vec4 x[];
+};
+
+layout(std430, binding = 1) buffer XNBuf {
+    vec4 xN[];
+};
+
+layout(std430, binding = 2) writeonly buffer VNBuf {
+    vec4 vN[];
+};
+
+void main() {
+    uint v = gl_GlobalInvocationID.x;
+    if (v >= pc.numVerts) {
+        return;
+    }
+
+    vec3 x_prev = xN[v].xyz;
+    vec3 x_now = x[v].xyz;
+    vec3 vel = (x_now - x_prev) * pc.invDt;
+    vN[v] = vec4(vel, 0.0);
+    xN[v] = vec4(x_now, 0.0);
+}

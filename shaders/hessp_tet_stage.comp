@@ -1,0 +1,243 @@
+#version 460
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform PushConstants {
+    uint numVerts;
+    uint numTets;
+    float invDt2;
+    float mu;
+    float lam;
+    float alpha;
+    float groundY;
+    float groundK;
+    uint useGround;
+    uint numReduced;
+} pc;
+
+layout(std430, binding = 0) readonly buffer XBuf {
+    vec4 x[];
+};
+
+layout(std430, binding = 1) readonly buffer PBuf {
+    vec4 p[];
+};
+
+layout(std430, binding = 2) readonly buffer TetBuf {
+    uvec4 tets[];
+};
+
+layout(std430, binding = 3) readonly buffer DmInvBuf {
+    float dminv[];
+};
+
+layout(std430, binding = 4) readonly buffer VolBuf {
+    float vol[];
+};
+
+layout(std430, binding = 5) writeonly buffer TetContribBuf {
+    vec4 tetContrib[];
+};
+
+float det3(in float m[9]) {
+    return m[0] * (m[4] * m[8] - m[5] * m[7]) -
+           m[1] * (m[3] * m[8] - m[5] * m[6]) +
+           m[2] * (m[3] * m[7] - m[4] * m[6]);
+}
+
+void mat3_mul(in float a[9], in float b[9], out float o[9]) {
+    o[0] = a[0] * b[0] + a[1] * b[3] + a[2] * b[6];
+    o[1] = a[0] * b[1] + a[1] * b[4] + a[2] * b[7];
+    o[2] = a[0] * b[2] + a[1] * b[5] + a[2] * b[8];
+    o[3] = a[3] * b[0] + a[4] * b[3] + a[5] * b[6];
+    o[4] = a[3] * b[1] + a[4] * b[4] + a[5] * b[7];
+    o[5] = a[3] * b[2] + a[4] * b[5] + a[5] * b[8];
+    o[6] = a[6] * b[0] + a[7] * b[3] + a[8] * b[6];
+    o[7] = a[6] * b[1] + a[7] * b[4] + a[8] * b[7];
+    o[8] = a[6] * b[2] + a[7] * b[5] + a[8] * b[8];
+}
+
+void mat3_transpose(in float a[9], out float o[9]) {
+    o[0] = a[0];
+    o[1] = a[3];
+    o[2] = a[6];
+    o[3] = a[1];
+    o[4] = a[4];
+    o[5] = a[7];
+    o[6] = a[2];
+    o[7] = a[5];
+    o[8] = a[8];
+}
+
+void compute_dP_volume(in float F[9], in float dF[9], float A, out float o[9]) {
+    float F1_1 = F[0];
+    float F2_1 = F[3];
+    float F3_1 = F[6];
+    float F1_2 = F[1];
+    float F2_2 = F[4];
+    float F3_2 = F[7];
+    float F1_3 = F[2];
+    float F2_3 = F[5];
+    float F3_3 = F[8];
+
+    float detF = det3(F);
+    float k = detF - pc.alpha;
+
+    float ddet[9];
+    ddet[0] = F2_2 * F3_3 - F2_3 * F3_2;
+    ddet[1] = F1_3 * F3_2 - F1_2 * F3_3;
+    ddet[2] = F1_2 * F2_3 - F1_3 * F2_2;
+    ddet[3] = F2_3 * F3_1 - F2_1 * F3_3;
+    ddet[4] = F1_1 * F3_3 - F1_3 * F3_1;
+    ddet[5] = F1_3 * F2_1 - F1_1 * F2_3;
+    ddet[6] = F2_1 * F3_2 - F2_2 * F3_1;
+    ddet[7] = F1_2 * F3_1 - F1_1 * F3_2;
+    ddet[8] = F1_1 * F2_2 - F1_2 * F2_1;
+
+    float H[81];
+    for (uint i = 0u; i < 9u; ++i) {
+        for (uint j = 0u; j < 9u; ++j) {
+            H[i * 9u + j] = ddet[i] * ddet[j];
+        }
+    }
+
+    H[0u * 9u + 4u] += k * F3_3;
+    H[4u * 9u + 0u] += k * F3_3;
+    H[0u * 9u + 5u] += k * (-F2_3);
+    H[5u * 9u + 0u] += k * (-F2_3);
+    H[0u * 9u + 7u] += k * (-F3_2);
+    H[7u * 9u + 0u] += k * (-F3_2);
+    H[0u * 9u + 8u] += k * F2_2;
+    H[8u * 9u + 0u] += k * F2_2;
+
+    H[1u * 9u + 3u] += k * (-F3_3);
+    H[3u * 9u + 1u] += k * (-F3_3);
+    H[1u * 9u + 5u] += k * F1_3;
+    H[5u * 9u + 1u] += k * F1_3;
+    H[1u * 9u + 6u] += k * F3_2;
+    H[6u * 9u + 1u] += k * F3_2;
+    H[1u * 9u + 8u] += k * (-F1_2);
+    H[8u * 9u + 1u] += k * (-F1_2);
+
+    H[2u * 9u + 3u] += k * F2_3;
+    H[3u * 9u + 2u] += k * F2_3;
+    H[2u * 9u + 4u] += k * (-F1_3);
+    H[4u * 9u + 2u] += k * (-F1_3);
+    H[2u * 9u + 6u] += k * (-F2_2);
+    H[6u * 9u + 2u] += k * (-F2_2);
+    H[2u * 9u + 7u] += k * F1_2;
+    H[7u * 9u + 2u] += k * F1_2;
+
+    H[3u * 9u + 7u] += k * F3_1;
+    H[7u * 9u + 3u] += k * F3_1;
+    H[3u * 9u + 8u] += k * (-F2_1);
+    H[8u * 9u + 3u] += k * (-F2_1);
+
+    H[4u * 9u + 6u] += k * (-F3_1);
+    H[6u * 9u + 4u] += k * (-F3_1);
+    H[4u * 9u + 8u] += k * F1_1;
+    H[8u * 9u + 4u] += k * F1_1;
+
+    H[5u * 9u + 6u] += k * F2_1;
+    H[6u * 9u + 5u] += k * F2_1;
+    H[5u * 9u + 7u] += k * (-F1_1);
+    H[7u * 9u + 5u] += k * (-F1_1);
+
+    for (uint i = 0u; i < 9u; ++i) {
+        for (uint j = 0u; j < 9u; ++j) {
+            H[i * 9u + j] *= pc.lam;
+        }
+        H[i * 9u + i] += pc.mu;
+    }
+    for (uint i = 0u; i < 81u; ++i) {
+        H[i] *= A;
+    }
+
+    float v[9];
+    v[0] = dF[0];
+    v[1] = dF[3];
+    v[2] = dF[6];
+    v[3] = dF[1];
+    v[4] = dF[4];
+    v[5] = dF[7];
+    v[6] = dF[2];
+    v[7] = dF[5];
+    v[8] = dF[8];
+
+    float dv[9];
+    for (uint i = 0u; i < 9u; ++i) {
+        float sum = 0.0;
+        for (uint j = 0u; j < 9u; ++j) {
+            sum += H[i * 9u + j] * v[j];
+        }
+        dv[i] = sum;
+    }
+
+    o[0] = dv[0];
+    o[1] = dv[3];
+    o[2] = dv[6];
+    o[3] = dv[1];
+    o[4] = dv[4];
+    o[5] = dv[7];
+    o[6] = dv[2];
+    o[7] = dv[5];
+    o[8] = dv[8];
+}
+
+void main() {
+    uint t = gl_GlobalInvocationID.x;
+    if (t >= pc.numTets) {
+        return;
+    }
+
+    uvec4 tet = tets[t];
+    vec3 x0 = x[tet.x].xyz;
+    vec3 x1 = x[tet.y].xyz;
+    vec3 x2 = x[tet.z].xyz;
+    vec3 x3 = x[tet.w].xyz;
+
+    vec3 p0 = p[tet.x].xyz;
+    vec3 p1 = p[tet.y].xyz;
+    vec3 p2 = p[tet.z].xyz;
+    vec3 p3 = p[tet.w].xyz;
+
+    float Ds[9];
+    Ds[0] = x1.x - x0.x; Ds[1] = x2.x - x0.x; Ds[2] = x3.x - x0.x;
+    Ds[3] = x1.y - x0.y; Ds[4] = x2.y - x0.y; Ds[5] = x3.y - x0.y;
+    Ds[6] = x1.z - x0.z; Ds[7] = x2.z - x0.z; Ds[8] = x3.z - x0.z;
+
+    float dDm[9];
+    dDm[0] = p1.x - p0.x; dDm[1] = p2.x - p0.x; dDm[2] = p3.x - p0.x;
+    dDm[3] = p1.y - p0.y; dDm[4] = p2.y - p0.y; dDm[5] = p3.y - p0.y;
+    dDm[6] = p1.z - p0.z; dDm[7] = p2.z - p0.z; dDm[8] = p3.z - p0.z;
+
+    float Dm[9];
+    uint dmBase = t * 9u;
+    for (uint i = 0u; i < 9u; ++i) {
+        Dm[i] = dminv[dmBase + i];
+    }
+
+    float F[9];
+    float dF[9];
+    mat3_mul(Ds, Dm, F);
+    mat3_mul(dDm, Dm, dF);
+
+    float dP[9];
+    compute_dP_volume(F, dF, vol[t], dP);
+
+    float DmT[9];
+    mat3_transpose(Dm, DmT);
+    float dH[9];
+    mat3_mul(dP, DmT, dH);
+
+    vec3 g1 = vec3(dH[0], dH[3], dH[6]);
+    vec3 g2 = vec3(dH[1], dH[4], dH[7]);
+    vec3 g3 = vec3(dH[2], dH[5], dH[8]);
+    vec3 g0 = -(g1 + g2 + g3);
+
+    uint outBase = t * 4u;
+    tetContrib[outBase + 0u] = vec4(g0, 0.0);
+    tetContrib[outBase + 1u] = vec4(g1, 0.0);
+    tetContrib[outBase + 2u] = vec4(g2, 0.0);
+    tetContrib[outBase + 3u] = vec4(g3, 0.0);
+}

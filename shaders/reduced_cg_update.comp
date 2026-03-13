@@ -1,0 +1,194 @@
+#version 460
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform PushConstants {
+    uint numVerts;
+    uint numTets;
+    float invDt2;
+    float mu;
+    float lam;
+    float alpha;
+    float groundY;
+    float groundK;
+    uint useGround;
+    uint numReduced;
+    float dt;
+    float invDt;
+    float gravityX;
+    float gravityY;
+    float gravityZ;
+    float cgDamping;
+    float cgRelTol;
+    uint cgMaxIters;
+    uint pad0;
+} pc;
+
+layout(std430, binding = 0) buffer PBuf {
+    float p[];
+};
+
+layout(std430, binding = 1) readonly buffer ApBuf {
+    float ap[];
+};
+
+layout(std430, binding = 2) buffer RBuf {
+    float r[];
+};
+
+layout(std430, binding = 3) buffer XBuf {
+    float x[];
+};
+
+struct CgControl {
+    float rr;
+    float rrStop;
+    uint iter;
+    uint converged;
+};
+
+layout(std430, binding = 4) buffer CtrlBuf {
+    CgControl ctrl;
+};
+
+struct DispatchArgs {
+    uint x;
+    uint y;
+    uint z;
+};
+
+struct CgDispatchArgs {
+    DispatchArgs buildWorld;
+    DispatchArgs hessTet;
+    DispatchArgs hessVert;
+    DispatchArgs projectStage1;
+    DispatchArgs projectStage2;
+};
+
+layout(std430, binding = 5) buffer DispatchBuf {
+    CgDispatchArgs args;
+};
+
+shared float ssum0[256];
+shared float ssum1[256];
+shared float s_alpha;
+shared float s_beta;
+shared uint s_active;
+
+void setDispatchArgs(bool enabled) {
+    uint verts_group = (pc.numVerts + 255u) / 256u;
+    uint tets_group = (pc.numTets + 255u) / 256u;
+    uint chunks = (pc.numVerts + 255u) / 256u;
+    uint reduced_group = (pc.numReduced + 63u) / 64u;
+    uint active_mask = enabled ? 1u : 0u;
+
+    args.buildWorld.x = verts_group * active_mask;
+    args.buildWorld.y = 1u;
+    args.buildWorld.z = 1u;
+
+    args.hessTet.x = tets_group * active_mask;
+    args.hessTet.y = 1u;
+    args.hessTet.z = 1u;
+
+    args.hessVert.x = verts_group * active_mask;
+    args.hessVert.y = 1u;
+    args.hessVert.z = 1u;
+
+    args.projectStage1.x = chunks * active_mask;
+    args.projectStage1.y = max(pc.numReduced, 1u);
+    args.projectStage1.z = 1u;
+
+    args.projectStage2.x = reduced_group * active_mask;
+    args.projectStage2.y = 1u;
+    args.projectStage2.z = 1u;
+}
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    if (tid == 0u) {
+        s_active = (ctrl.converged == 0u) ? 1u : 0u;
+    }
+    barrier();
+    if (s_active == 0u) {
+        if (tid == 0u) {
+            setDispatchArgs(false);
+        }
+        return;
+    }
+
+    float denom_part = 0.0;
+    for (uint i = tid; i < pc.numReduced; i += gl_WorkGroupSize.x) {
+        float pi = p[i];
+        float yi = ap[i] + pc.cgDamping * pi;
+        denom_part += pi * yi;
+    }
+    ssum0[tid] = denom_part;
+    barrier();
+
+    for (uint stride = gl_WorkGroupSize.x >> 1u; stride > 0u; stride >>= 1u) {
+        if (tid < stride) {
+            ssum0[tid] += ssum0[tid + stride];
+        }
+        barrier();
+    }
+
+    if (tid == 0u) {
+        float denom = ssum0[0];
+        if (abs(denom) < 1e-20) {
+            s_alpha = 0.0;
+            s_beta = 0.0;
+            ctrl.converged = 1u;
+            setDispatchArgs(false);
+        } else {
+            s_alpha = ctrl.rr / denom;
+        }
+    }
+    barrier();
+    if (ctrl.converged != 0u) {
+        return;
+    }
+
+    float rr_new_part = 0.0;
+    for (uint i = tid; i < pc.numReduced; i += gl_WorkGroupSize.x) {
+        float pi = p[i];
+        float yi = ap[i] + pc.cgDamping * pi;
+        float ri = r[i] - s_alpha * yi;
+        r[i] = ri;
+        x[i] += s_alpha * pi;
+        rr_new_part += ri * ri;
+    }
+    ssum1[tid] = rr_new_part;
+    barrier();
+
+    for (uint stride = gl_WorkGroupSize.x >> 1u; stride > 0u; stride >>= 1u) {
+        if (tid < stride) {
+            ssum1[tid] += ssum1[tid + stride];
+        }
+        barrier();
+    }
+
+    if (tid == 0u) {
+        float rr_old = ctrl.rr;
+        float rr_new = ssum1[0];
+        ctrl.rr = rr_new;
+        ctrl.iter += 1u;
+
+        bool stop = (rr_new < 1e-12) || (ctrl.rrStop > 0.0 && rr_new <= ctrl.rrStop);
+        if (stop) {
+            ctrl.converged = 1u;
+            s_beta = 0.0;
+            setDispatchArgs(false);
+        } else {
+            s_beta = (rr_old > 0.0) ? (rr_new / rr_old) : 0.0;
+            setDispatchArgs(true);
+        }
+    }
+    barrier();
+    if (ctrl.converged != 0u) {
+        return;
+    }
+
+    for (uint i = tid; i < pc.numReduced; i += gl_WorkGroupSize.x) {
+        p[i] = r[i] + s_beta * p[i];
+    }
+}

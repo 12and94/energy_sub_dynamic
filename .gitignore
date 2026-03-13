@@ -1,0 +1,45 @@
+# Build outputs
+/build/
+/out/
+/cmake-build-*/
+
+# CMake artifacts
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+compile_commands.json
+*.dir/
+
+# Visual Studio / IDE
+/.vs/
+*.sln
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+*.ilk
+*.pdb
+*.obj
+*.idb
+*.tlog
+
+# Runtime outputs
+*.vkcs_output/
+frame_*.obj
+
+# Shader binaries
+*.spv
+
+# Large optional dataset (exclude from default GitHub upload)
+/data/example_3/
+
+# Local docs drafts (exclude from default GitHub upload)
+/docs/
+
+# Editors
+/.vscode/
+*.swp
+*.swo
+
+# OS files
+Thumbs.db
+Desktop.ini

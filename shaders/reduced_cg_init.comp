@@ -1,0 +1,132 @@
+#version 460
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform PushConstants {
+    uint numVerts;
+    uint numTets;
+    float invDt2;
+    float mu;
+    float lam;
+    float alpha;
+    float groundY;
+    float groundK;
+    uint useGround;
+    uint numReduced;
+    float dt;
+    float invDt;
+    float gravityX;
+    float gravityY;
+    float gravityZ;
+    float cgDamping;
+    float cgRelTol;
+    uint cgMaxIters;
+    uint pad0;
+} pc;
+
+layout(std430, binding = 0) readonly buffer RhsBuf {
+    float rhs[];
+};
+
+layout(std430, binding = 1) writeonly buffer PBuf {
+    float p[];
+};
+
+layout(std430, binding = 2) writeonly buffer RBuf {
+    float r[];
+};
+
+layout(std430, binding = 3) writeonly buffer XBuf {
+    float x[];
+};
+
+struct CgControl {
+    float rr;
+    float rrStop;
+    uint iter;
+    uint converged;
+};
+
+layout(std430, binding = 4) buffer CtrlBuf {
+    CgControl ctrl;
+};
+
+struct DispatchArgs {
+    uint x;
+    uint y;
+    uint z;
+};
+
+struct CgDispatchArgs {
+    DispatchArgs buildWorld;
+    DispatchArgs hessTet;
+    DispatchArgs hessVert;
+    DispatchArgs projectStage1;
+    DispatchArgs projectStage2;
+};
+
+layout(std430, binding = 5) buffer DispatchBuf {
+    CgDispatchArgs args;
+};
+
+shared float ssum[256];
+
+void setDispatchArgs(bool enabled) {
+    uint verts_group = (pc.numVerts + 255u) / 256u;
+    uint tets_group = (pc.numTets + 255u) / 256u;
+    uint chunks = (pc.numVerts + 255u) / 256u;
+    uint reduced_group = (pc.numReduced + 63u) / 64u;
+    uint active_mask = enabled ? 1u : 0u;
+
+    args.buildWorld.x = verts_group * active_mask;
+    args.buildWorld.y = 1u;
+    args.buildWorld.z = 1u;
+
+    args.hessTet.x = tets_group * active_mask;
+    args.hessTet.y = 1u;
+    args.hessTet.z = 1u;
+
+    args.hessVert.x = verts_group * active_mask;
+    args.hessVert.y = 1u;
+    args.hessVert.z = 1u;
+
+    args.projectStage1.x = chunks * active_mask;
+    args.projectStage1.y = max(pc.numReduced, 1u);
+    args.projectStage1.z = 1u;
+
+    args.projectStage2.x = reduced_group * active_mask;
+    args.projectStage2.y = 1u;
+    args.projectStage2.z = 1u;
+}
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    float rr_part = 0.0;
+    for (uint i = tid; i < pc.numReduced; i += gl_WorkGroupSize.x) {
+        float ri = rhs[i];
+        p[i] = ri;
+        r[i] = ri;
+        x[i] = 0.0;
+        rr_part += ri * ri;
+    }
+
+    ssum[tid] = rr_part;
+    barrier();
+
+    for (uint stride = gl_WorkGroupSize.x >> 1u; stride > 0u; stride >>= 1u) {
+        if (tid < stride) {
+            ssum[tid] += ssum[tid + stride];
+        }
+        barrier();
+    }
+
+    if (tid == 0u) {
+        float rr0 = max(ssum[0], 1e-30);
+        float rel_tol = max(pc.cgRelTol, 0.0);
+        ctrl.rr = ssum[0];
+        ctrl.rrStop = (rel_tol > 0.0) ? (rel_tol * rel_tol * rr0) : 0.0;
+        ctrl.iter = 0u;
+        ctrl.converged = (ctrl.rr < 1e-20 || (ctrl.rrStop > 0.0 && ctrl.rr <= ctrl.rrStop)) ? 1u : 0u;
+        setDispatchArgs(ctrl.converged == 0u);
+    }
+}

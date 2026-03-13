@@ -1,0 +1,66 @@
+#version 460
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform PushConstants {
+    uint numVerts;
+    uint numTets;
+    float invDt2;
+    float mu;
+    float lam;
+    float alpha;
+    float groundY;
+    float groundK;
+    uint useGround;
+    uint numReduced;
+} pc;
+
+layout(std430, binding = 0) readonly buffer BasisBuf {
+    float basis[];
+};
+
+layout(std430, binding = 1) readonly buffer WorldBuf {
+    vec4 world[];
+};
+
+layout(std430, binding = 2) writeonly buffer PartialBuf {
+    float partial[];
+};
+
+shared float sdata[256];
+
+void main() {
+    uint chunk = gl_WorkGroupID.x;
+    uint k = gl_WorkGroupID.y;
+    if (k >= pc.numReduced) {
+        return;
+    }
+
+    uint tid = gl_LocalInvocationID.x;
+    uint v = chunk * gl_WorkGroupSize.x + tid;
+
+    float val = 0.0;
+    if (v < pc.numVerts) {
+        vec3 w = world[v].xyz;
+        uint r = pc.numReduced;
+        uint row0 = (3u * v + 0u) * r;
+        uint row1 = (3u * v + 1u) * r;
+        uint row2 = (3u * v + 2u) * r;
+        val = basis[row0 + k] * w.x + basis[row1 + k] * w.y + basis[row2 + k] * w.z;
+    }
+    sdata[tid] = val;
+
+    barrier();
+
+    for (uint stride = gl_WorkGroupSize.x >> 1u; stride > 0u; stride >>= 1u) {
+        if (tid < stride) {
+            sdata[tid] += sdata[tid + stride];
+        }
+        barrier();
+    }
+
+    if (tid == 0u) {
+        uint numChunks = (pc.numVerts + gl_WorkGroupSize.x - 1u) / gl_WorkGroupSize.x;
+        partial[k * numChunks + chunk] = sdata[0];
+    }
+}
